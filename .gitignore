@@ -1,0 +1,36 @@
+# Claude Code local settings
+.claude/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+installer_output/
+
+# Icon cache (generated at runtime)
+cache/
+
+# User config (contains personal paths and settings)
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
