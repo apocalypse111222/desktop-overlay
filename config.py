@@ -5,7 +5,7 @@ import threading
 import uuid
 
 DEFAULT_CONFIG = {
-    "wallpaper": None,
+    "wallpaper": "assets/default_wallpaper.jpg",   # shown on first launch
     "wallpaper_fit": "fill",
     "shortcuts": [],
     "sections": [],

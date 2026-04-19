@@ -1,5 +1,5 @@
 #define AppName "Desktop Overlay"
-#define AppVersion "1.0"
+#define AppVersion "1.1.0"
 #define AppPublisher "My Projects"
 #define AppExeName "Desktop Overlay.exe"
 #define SourceDir "dist\Desktop Overlay"

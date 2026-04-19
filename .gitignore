@@ -10,6 +10,9 @@ installer_output/
 # Icon cache (generated at runtime)
 cache/
 
+# WebView2 profile — contains cookies/session data (user-specific, not for repo)
+webview_data/
+
 # User config (contains personal paths and settings)
 config.json
 

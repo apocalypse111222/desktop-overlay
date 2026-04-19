@@ -14,6 +14,103 @@ from desktop_icons import hide_desktop_icons, show_desktop_icons
 from icon_extractor import cache_icon
 from section import Section
 from shortcut import Shortcut, ICON_SIZE, LABEL_WIDTH, GRID_SNAP
+from web_widget import WebWidget
+
+
+def _draw_glass_icon(canvas: tk.Canvas, cx: int, cy: int, R: int,
+                     fill: str, border: str, shine: str,
+                     emoji: str, tag: str) -> list[int]:
+    """
+    iOS 26-style liquid glass circular button — dark frosted glass + white icon.
+
+    Layers (bottom → top):
+      1. Drop shadow        — soft black aura, slightly larger
+      2. Outer glow ring    — semi-dark ring for depth
+      3. Glass body         — dark navy circle (iOS 26 dark card colour)
+      4. Specular highlight — small brighter crescent at top (glass lens flare)
+      5. White icon         — canvas-drawn white symbol (NOT coloured emoji)
+    """
+    items: list[int] = []
+
+    # Determine icon type from tag (drives which white icon to draw)
+    is_clipboard = "clipboard" in tag
+
+    # 1. Drop shadow — slightly larger, pitch black, no outline
+    items.append(canvas.create_oval(
+        cx - R - 5, cy - R - 5, cx + R + 5, cy + R + 5,
+        fill="#000000", outline="",
+        tags=(tag,),
+    ))
+
+    # 2. Outer glow ring — 2 px larger than body, very dark border
+    items.append(canvas.create_oval(
+        cx - R - 2, cy - R - 2, cx + R + 2, cy + R + 2,
+        fill="#0a0f1e", outline=border, width=1,
+        tags=(tag,),
+    ))
+
+    # 3. Glass body — iOS 26 dark navy fill
+    items.append(canvas.create_oval(
+        cx - R, cy - R, cx + R, cy + R,
+        fill=fill, outline=border, width=1,
+        tags=(tag,),
+    ))
+
+    # 4. Specular highlight — narrow brighter oval at top-centre (lens flare)
+    hw = int(R * 0.45)
+    items.append(canvas.create_oval(
+        cx - hw, cy - R + 5,
+        cx + hw, cy - R + 5 + int(R * 0.28),
+        fill=shine, outline="",
+        tags=(tag,),
+    ))
+
+    # 5. White icon drawn with canvas primitives
+    #    (Coloured emoji cannot be recoloured — canvas primitives stay white)
+    s = int(R * 0.42)   # icon half-size, scales with button radius
+    iy = cy + 1          # vertical centre with 1 px nudge
+
+    if is_clipboard:
+        # Notes / clipboard: three horizontal lines (hamburger list)
+        for dy in (-s // 2, 0, s // 2):
+            items.append(canvas.create_line(
+                cx - s, iy + dy, cx + s, iy + dy,
+                fill="white", width=2, capstyle="round",
+                tags=(tag,),
+            ))
+        # Small vertical nub at top-left (clipboard clip)
+        items.append(canvas.create_rectangle(
+            cx - s // 3, iy - s - 3,
+            cx + s // 3, iy - s + 3,
+            fill="white", outline="",
+            tags=(tag,),
+        ))
+    else:
+        # AirPortal / upload: upward arrow
+        ax, ay = cx, iy
+        # Shaft
+        items.append(canvas.create_line(
+            ax, ay + s, ax, ay - s + 3,
+            fill="white", width=2, capstyle="round",
+            tags=(tag,),
+        ))
+        # Arrow head (two diagonal lines)
+        items.append(canvas.create_line(
+            ax - s + 3, ay - s // 2 + 5,
+            ax, ay - s + 3,
+            ax + s - 3, ay - s // 2 + 5,
+            fill="white", width=2,
+            joinstyle="miter", capstyle="round",
+            tags=(tag,),
+        ))
+        # Small base line
+        items.append(canvas.create_line(
+            ax - s, ay + s, ax + s, ay + s,
+            fill="white", width=2, capstyle="round",
+            tags=(tag,),
+        ))
+
+    return items
 
 
 class _RECT(ctypes.Structure):
@@ -45,6 +142,7 @@ class OverlayWindow:
         self._selected:  set[str]            = set()
         self._minimized_by_us: list[int]     = []
         self._clipboard_widget: ClipboardWidget | None = None
+        self._web_widget: WebWidget | None = None
 
         # Rubber-band state
         self._rb_start = None
@@ -57,6 +155,7 @@ class OverlayWindow:
         self._load_shortcuts()
         self._arrange_z_order()
         self._setup_clipboard_widget()
+        self._setup_web_widget()
         self._bind_events()
 
         if config.get("overlay_visible_on_start"):
@@ -99,9 +198,11 @@ class OverlayWindow:
         self.root.lift()
         self.visible = True
         hide_desktop_icons()
-        # Re-lift clipboard widget above the overlay after it settles
+        # Re-lift floating widgets above the overlay after it settles
         if self._clipboard_widget:
             self.root.after(50, self._clipboard_widget.lift)
+        if self._web_widget:
+            self.root.after(50, lambda: self._web_widget.lift(self._overlay_hwnd()))
 
     def lower_for_launch(self):
         self._minimize_other_windows()
@@ -149,7 +250,16 @@ class OverlayWindow:
 
     def _load_wallpaper(self):
         path = self.config.get("wallpaper")
-        if not path or not os.path.exists(path):
+        if not path:
+            return
+        # PyInstaller 6+ places bundled data in _internal/ (sys._MEIPASS).
+        # Relative paths (e.g. "assets/default_wallpaper.jpg") must be resolved
+        # there when running frozen; absolute user-chosen paths are used as-is.
+        if not os.path.isabs(path) and getattr(sys, "frozen", False):
+            candidate = os.path.join(getattr(sys, "_MEIPASS", ""), path)
+            if os.path.exists(candidate):
+                path = candidate
+        if not os.path.exists(path):
             return
         fit = self.config.get("wallpaper_fit", "fill")
         sw = self.root.winfo_screenwidth()
@@ -321,7 +431,7 @@ class OverlayWindow:
         except Exception:
             pass
 
-    # ── Clipboard widget ──────────────────────────────────────────────
+    # ── Clipboard widget + corner icon ───────────────────────────────
 
     def _setup_clipboard_widget(self):
         self._clipboard_widget = ClipboardWidget(
@@ -329,12 +439,79 @@ class OverlayWindow:
             config=self.config,
             on_position_changed=self._on_clipboard_moved,
         )
+        self._clipboard_icon_items: list[int] = []
+        self._draw_clipboard_icon()
+
+    def _draw_clipboard_icon(self):
+        """Draw iOS 26-style liquid glass clipboard icon in the bottom-right corner."""
+        for item in self._clipboard_icon_items:
+            self.canvas.delete(item)
+        self._clipboard_icon_items.clear()
+
+        _, _, w, h = self._get_display_area()
+        R  = 28
+        # Place to the left of the AirPortal icon
+        cx = w - R - 16 - (R * 2) - 8
+        cy = h - R - 16
+
+        items = _draw_glass_icon(self.canvas, cx, cy, R,
+                                 fill="#0e1530", border="#4060a0",
+                                 shine="#1e3060", emoji="",
+                                 tag="clipboard_icon")
+        self._clipboard_icon_items = items
+
+        for item in self._clipboard_icon_items:
+            self.canvas.tag_bind(item, "<Button-1>",
+                                 lambda e: self._clipboard_widget.toggle()
+                                 if self._clipboard_widget else None)
+            self.canvas.tag_bind(item, "<Enter>",
+                                 lambda e: self.canvas.config(cursor="hand2"))
+            self.canvas.tag_bind(item, "<Leave>",
+                                 lambda e: self.canvas.config(cursor=""))
+            self.canvas.tag_raise(item)
 
     def _on_clipboard_moved(self, x: int, y: int):
         cfg = dict(self.config.get("clipboard_widget", {}))
         cfg["x"] = x
         cfg["y"] = y
         self.config.set("clipboard_widget", cfg)
+
+    # ── AirPortal web widget + corner icon ───────────────────────────
+
+    def _setup_web_widget(self):
+        self._web_widget = WebWidget(root=self.root, config=self.config)
+        self._airportal_icon_items: list[int] = []
+        self._draw_airportal_icon()
+
+    def _draw_airportal_icon(self):
+        """Draw iOS 26-style liquid glass AirPortal icon in the bottom-right corner."""
+        for item in self._airportal_icon_items:
+            self.canvas.delete(item)
+        self._airportal_icon_items.clear()
+
+        _, _, w, h = self._get_display_area()
+        R  = 28
+        cx = w - R - 16
+        cy = h - R - 16
+
+        items = _draw_glass_icon(self.canvas, cx, cy, R,
+                                 fill="#0c1830", border="#3a6090",
+                                 shine="#183058", emoji="",
+                                 tag="airportal_icon")
+        self._airportal_icon_items = items
+
+        for item in self._airportal_icon_items:
+            self.canvas.tag_bind(item, "<Button-1>",
+                                 lambda e: self._web_widget.toggle()
+                                 if self._web_widget else None)
+            self.canvas.tag_bind(item, "<Enter>",
+                                 lambda e: self.canvas.config(cursor="hand2"))
+            self.canvas.tag_bind(item, "<Leave>",
+                                 lambda e: self.canvas.config(cursor=""))
+
+        # Keep icon on top of wallpaper/sections
+        for item in self._airportal_icon_items:
+            self.canvas.tag_raise(item)
 
     # ── Autostart ─────────────────────────────────────────────────────
 
@@ -387,6 +564,13 @@ class OverlayWindow:
 
     # ── Events ────────────────────────────────────────────────────────
 
+    def _overlay_hwnd(self) -> int:
+        """Return the true Win32 top-level HWND of the overlay root window."""
+        raw = self.root.winfo_id()
+        # GA_ROOT = 2: walk up to the outermost ancestor
+        top = ctypes.windll.user32.GetAncestor(raw, 2)
+        return top if top else raw
+
     def _bind_events(self):
         self.canvas.bind("<Button-3>",        self._on_canvas_right_click)
         self.canvas.bind("<ButtonPress-1>",   self._on_canvas_press)
@@ -395,10 +579,52 @@ class OverlayWindow:
         self.root.bind("<Escape>", lambda e: self.hide())
         # Re-lift clipboard widget above overlay whenever overlay gains focus
         self.root.bind("<FocusIn>", self._on_overlay_focus)
+        # Continuous z-order poll — keeps AirPortal (subprocess window) above overlay
+        self._z_order_poll()
 
     def _on_overlay_focus(self, event):
         if self._clipboard_widget:
-            self.root.after(20, self._clipboard_widget.lift)
+            self.root.after(0,  self._clipboard_widget.lift)
+            self.root.after(80, self._clipboard_widget.lift)
+        if self._web_widget:
+            hwnd = self._overlay_hwnd()
+            self.root.after(0,  lambda: self._web_widget.lift(hwnd))
+            self.root.after(80, lambda: self._web_widget.lift(hwnd))
+
+    def _z_order_poll(self):
+        """Every 150 ms enforce: clipboard → AirPortal → overlay (front→back)."""
+        if self.visible:
+            try:
+                overlay_hwnd  = self._overlay_hwnd()
+                air_hwnd      = (self._web_widget._hwnd
+                                 if self._web_widget and self._web_widget.visible
+                                 else None)
+                clip_win      = (self._clipboard_widget._win
+                                 if self._clipboard_widget else None)
+                clip_visible  = (self.config.get("clipboard_widget", {})
+                                 .get("visible", False))
+                clip_hwnd     = None
+                if clip_win and clip_visible:
+                    raw = clip_win.winfo_id()
+                    clip_hwnd = ctypes.windll.user32.GetAncestor(raw, 2) or raw
+
+                SWP = 0x0001 | 0x0002 | 0x0010   # NOSIZE|NOMOVE|NOACTIVATE
+
+                if air_hwnd:
+                    # Push overlay below AirPortal
+                    ctypes.windll.user32.SetWindowPos(
+                        overlay_hwnd, air_hwnd, 0, 0, 0, 0, SWP)
+                    if clip_hwnd:
+                        # Push AirPortal below clipboard
+                        ctypes.windll.user32.SetWindowPos(
+                            air_hwnd, clip_hwnd, 0, 0, 0, 0, SWP)
+                elif clip_hwnd:
+                    # Only clipboard visible — push overlay below clipboard
+                    ctypes.windll.user32.SetWindowPos(
+                        overlay_hwnd, clip_hwnd, 0, 0, 0, 0, SWP)
+            except Exception:
+                pass
+        self.root.after(150, self._z_order_poll)
 
     def _click_on_managed_item(self, x, y) -> bool:
         """Return True if (x, y) overlaps a shortcut, section, or clipboard widget."""
@@ -454,9 +680,10 @@ class OverlayWindow:
         if self._click_on_managed_item(event.x, event.y):
             return
 
-        cover   = self.config.get("cover_taskbar", False)
-        auto    = self._is_autostart_enabled()
-        clip_on = self.config.get("clipboard_widget", {}).get("visible", False)
+        cover    = self.config.get("cover_taskbar", False)
+        auto     = self._is_autostart_enabled()
+        clip_on  = self.config.get("clipboard_widget", {}).get("visible", False)
+        air_on   = self._web_widget.visible if self._web_widget else False
 
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="添加文件 / 程序快捷方式",
@@ -471,6 +698,10 @@ class OverlayWindow:
         menu.add_command(
             label="剪贴板 / 备忘录: " + ("显示中" if clip_on else "已隐藏"),
             command=self._clipboard_widget.toggle if self._clipboard_widget else None,
+        )
+        menu.add_command(
+            label="AirPortal 空投快传: " + ("显示中" if air_on else "已隐藏"),
+            command=self._web_widget.toggle if self._web_widget else None,
         )
         menu.add_separator()
         menu.add_command(
@@ -491,6 +722,8 @@ class OverlayWindow:
         self._restore_other_windows()
         if self._clipboard_widget:
             self._clipboard_widget.stop()
+        if self._web_widget:
+            self._web_widget.destroy()
         show_desktop_icons()
         self.root.quit()
 

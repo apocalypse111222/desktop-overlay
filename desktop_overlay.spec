@@ -10,11 +10,22 @@ hiddenimports = [
     'pywintypes',
     'keyboard',
     'PIL._tkinter_finder',
+    # pywebview
+    'webview',
+    'webview.platforms.edgechromium',
+    'clr',
+    'proxy_tools',
+    'bottle',
 ]
 hiddenimports += collect_submodules('pystray')
+hiddenimports += collect_submodules('webview')
 
 datas_extra, binaries_extra, hi_extra = collect_all('pystray')
 hiddenimports += hi_extra
+datas_wv, binaries_wv, hi_wv = collect_all('webview')
+datas_extra   += datas_wv
+binaries_extra += binaries_wv
+hiddenimports += hi_wv
 
 a = Analysis(
     ['main.py'],

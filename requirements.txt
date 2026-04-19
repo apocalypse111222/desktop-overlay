@@ -2,3 +2,4 @@ keyboard==0.13.5
 pystray==0.19.5
 Pillow>=9.4.0
 pywin32>=305
+pywebview>=4.0
